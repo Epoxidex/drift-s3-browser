@@ -1,5 +1,6 @@
 import { access } from 'node:fs/promises'
 import path from 'node:path'
+import type { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import multipart from '@fastify/multipart'
 import cookie from '@fastify/cookie'
@@ -109,9 +110,23 @@ export async function buildApp() {
     if (result.ETag) reply.header('etag', result.ETag)
     if (result.$metadata.httpStatusCode === 206) reply.code(206)
 
-    reply.send(result.Body)
-    client.destroy()
-    return reply
+    const stream = result.Body as Readable | undefined
+    if (!stream) {
+      client.destroy()
+      return reply.code(502).send({ error: 'S3 вернул пустой поток' })
+    }
+
+    let disposed = false
+    const disposeClient = () => {
+      if (disposed) return
+      disposed = true
+      client.destroy()
+    }
+    stream.once('end', disposeClient)
+    stream.once('close', disposeClient)
+    stream.once('error', disposeClient)
+
+    return reply.send(stream)
   })
 
   app.post<{ Querystring: Query }>('/api/objects/upload', async (request, reply) => {
