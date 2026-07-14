@@ -9,6 +9,7 @@ export default function App() {
   const [connections, setConnections] = useState<Connection[]>([])
   const [active, setActive] = useState<Connection | null>(null)
   const [loading, setLoading] = useState(true)
+  const [startupError, setStartupError] = useState('')
 
   useEffect(() => {
     let current = true
@@ -21,7 +22,9 @@ export default function App() {
         await setActiveConnection(saved.id)
         if (current) setActive(saved)
       }
-    }).catch(() => undefined).finally(() => current && setLoading(false))
+    }).catch((error) => {
+      if (current) setStartupError(error instanceof Error ? error.message : 'API-сервер недоступен')
+    }).finally(() => current && setLoading(false))
     return () => { current = false }
   }, [])
 
@@ -50,6 +53,7 @@ export default function App() {
     <ConnectionScreen
       connections={connections}
       loading={loading}
+      startupError={startupError}
       onConnect={connect}
       onCreated={(connection) => setConnections((items) => [...items, connection])}
     />

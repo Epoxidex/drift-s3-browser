@@ -88,6 +88,7 @@ button { color: inherit; }
 .checkbox-label input:checked { background: var(--green); border-color: var(--green); box-shadow: inset 0 0 0 4px var(--green), inset 0 0 0 6px white; }
 .checkbox-label > span { display: flex; flex-direction: column; gap: 2px; }.checkbox-label small { color: #8b918d; font-weight: 400; }
 .form-error { color: #9f3e33; background: #faebe8; border-radius: 8px; padding: 9px 11px; font-size: 12px; }
+.backend-warning { margin: -7px 0 18px; display: flex; align-items: flex-start; gap: 9px; color: #9f3e33; background: #faebe8; border: 1px solid #f0d2cc; border-radius: 10px; padding: 10px 11px; font-size: 11px; line-height: 1.45; }.backend-warning > svg { flex: none; margin-top: 1px; }.backend-warning span { display: flex; flex-direction: column; gap: 2px; }.backend-warning strong { font-size: 11px; }
 .connect-submit { width: 100%; margin-top: 3px; height: 44px; }
 .connect-footer { position: relative; z-index: 1; text-align: center; font-size: 10px; color: #9a9f9b; letter-spacing: .02em; }
 

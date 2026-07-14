@@ -6,6 +6,7 @@ import type { Connection } from '../types'
 type Props = {
   connections: Connection[]
   loading: boolean
+  startupError?: string
   onConnect: (connection: Connection) => Promise<void>
   onCreated: (connection: Connection) => void
 }
@@ -14,7 +15,7 @@ const initialValues = {
   name: '', endpoint: 'https://', bucket: '', region: '', accessKeyId: '', secretAccessKey: '', forcePathStyle: true,
 }
 
-export function ConnectionScreen({ connections, loading, onConnect, onCreated }: Props) {
+export function ConnectionScreen({ connections, loading, startupError, onConnect, onCreated }: Props) {
   const [showForm, setShowForm] = useState(connections.length === 0)
   const [showSecret, setShowSecret] = useState(false)
   const [values, setValues] = useState(initialValues)
@@ -67,6 +68,8 @@ export function ConnectionScreen({ connections, loading, onConnect, onCreated }:
             )}
           </div>
 
+          {startupError && <div className="backend-warning"><Server size={17} /><span><strong>Backend не отвечает</strong>{startupError}</span></div>}
+
           {!showForm ? (
             <div className="connection-list">
               {connections.map((connection) => (
@@ -99,4 +102,3 @@ export function ConnectionScreen({ connections, loading, onConnect, onCreated }:
     </main>
   )
 }
-

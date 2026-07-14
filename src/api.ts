@@ -16,7 +16,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (connectionId) headers.set('x-s3-connection', connectionId)
   if (options.body && !(options.body instanceof FormData)) headers.set('content-type', 'application/json')
 
-  const response = await fetch(path, { ...options, headers })
+  let response: Response
+  try {
+    response = await fetch(path, { ...options, headers })
+  } catch {
+    throw new ApiError('API-сервер недоступен. Убедитесь, что npm run dev запустил процессы [api] и [web].', 0)
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null
     throw new ApiError(body?.error || `Ошибка запроса (${response.status})`, response.status)
@@ -93,4 +98,3 @@ export function deleteObject(item: S3Object) {
     body: JSON.stringify({ key: item.key, type: item.type }),
   })
 }
-
