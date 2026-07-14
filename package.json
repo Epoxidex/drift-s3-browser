@@ -8,6 +8,8 @@
     "dev:api": "tsx watch server/index.ts",
     "dev:web": "vite",
     "build": "tsc -b && vite build",
+    "check": "npm run typecheck && npm test && npm run build",
+    "check:s3": "tsx scripts/check-s3.ts",
     "start": "tsx server/index.ts",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
