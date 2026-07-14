@@ -75,6 +75,17 @@ export async function getTextPreview(key: string) {
   return response.text()
 }
 
+export async function getBinaryPreview(key: string) {
+  let response: Response
+  try {
+    response = await fetch(contentUrl(key), { headers: { 'x-s3-connection': connectionId } })
+  } catch {
+    throw new ApiError('Не удалось загрузить файл для предпросмотра', 0)
+  }
+  if (!response.ok) throw new ApiError('Не удалось загрузить файл для предпросмотра', response.status)
+  return new Uint8Array(await response.arrayBuffer())
+}
+
 export function createFolder(key: string) {
   return request<{ key: string }>('/api/objects/folder', { method: 'POST', body: JSON.stringify({ key }) })
 }

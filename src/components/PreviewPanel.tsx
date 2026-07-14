@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Braces, Download, File, FileText, Image as ImageIcon, Info, LoaderCircle, X } from 'lucide-react'
-import { contentUrl, getObjectMeta, getTextPreview } from '../api'
+import { contentUrl, getBinaryPreview, getObjectMeta, getTextPreview } from '../api'
 import type { ObjectMeta, S3Object } from '../types'
+
+const PdfPreview = lazy(() => import('./PdfPreview').then((module) => ({ default: module.PdfPreview })))
 
 function formatBytes(value: number) {
   if (!value) return '0 Б'
@@ -21,6 +23,7 @@ function previewKind(item: S3Object, meta: ObjectMeta | null) {
 export function PreviewPanel({ item, onClose }: { item: S3Object; onClose: () => void }) {
   const [meta, setMeta] = useState<ObjectMeta | null>(null)
   const [text, setText] = useState('')
+  const [pdfData, setPdfData] = useState<Uint8Array<ArrayBuffer> | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const kind = previewKind(item, meta)
@@ -29,10 +32,12 @@ export function PreviewPanel({ item, onClose }: { item: S3Object; onClose: () =>
     let current = true
     setLoading(true)
     setError('')
+    setPdfData(null)
     getObjectMeta(item.key).then(async (value) => {
       if (!current) return
       setMeta(value)
       if (previewKind(item, value) === 'text') setText(await getTextPreview(item.key))
+      if (previewKind(item, value) === 'pdf') setPdfData(await getBinaryPreview(item.key))
     }).catch((caught) => current && setError(caught instanceof Error ? caught.message : 'Ошибка предпросмотра'))
       .finally(() => current && setLoading(false))
     return () => { current = false }
@@ -50,7 +55,11 @@ export function PreviewPanel({ item, onClose }: { item: S3Object; onClose: () =>
         {loading && <div className="preview-state"><LoaderCircle className="spin" /><span>Открываем файл…</span></div>}
         {!loading && error && <div className="preview-state"><Info /><span>{error}</span></div>}
         {!loading && !error && kind === 'image' && <img src={contentUrl(item.key)} alt={item.name} />}
-        {!loading && !error && kind === 'pdf' && <iframe src={contentUrl(item.key)} title={item.name} />}
+        {!loading && !error && kind === 'pdf' && pdfData && (
+          <Suspense fallback={<div className="preview-state"><LoaderCircle className="spin" /><span>Готовим просмотрщик…</span></div>}>
+            <PdfPreview data={pdfData} fileName={item.name} />
+          </Suspense>
+        )}
         {!loading && !error && kind === 'text' && <pre>{text}{meta && meta.size > 524288 ? '\n\n… показаны первые 512 КБ' : ''}</pre>}
         {!loading && !error && kind === 'unknown' && <div className="unknown-preview"><FileText size={50} strokeWidth={1.25} /><strong>Нет быстрого просмотра</strong><span>Файл можно скачать и открыть в подходящем приложении.</span></div>}
       </div>
@@ -64,4 +73,3 @@ export function PreviewPanel({ item, onClose }: { item: S3Object; onClose: () =>
     </aside>
   )
 }
-
