@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Database, LoaderCircle } from 'lucide-react'
 import { clearActiveConnection, getConnections, setActiveConnection } from './api'
 import { Browser } from './components/Browser'
 import { ConnectionScreen } from './components/ConnectionScreen'
@@ -37,6 +38,10 @@ export default function App() {
   function disconnect() {
     clearActiveConnection()
     setActive(null)
+  }
+
+  if (loading) {
+    return <main className="app-loading"><div className="brand-mark"><Database size={20} /></div><strong>Drift</strong><LoaderCircle className="spin" size={18} /></main>
   }
 
   if (active) return <Browser connection={active} onDisconnect={disconnect} />

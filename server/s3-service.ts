@@ -32,7 +32,7 @@ export async function listObjects(client: S3Client, connection: StoredConnection
 
   const folders: ObjectItem[] = (response.CommonPrefixes ?? []).flatMap(({ Prefix }) => Prefix ? [{
     key: Prefix,
-    name: Prefix.slice(prefix.length).replace(/\/$/, ''),
+    name: Prefix.slice(prefix.length).replace(/\/$/, '') || '/',
     type: 'folder' as const,
     size: 0,
     lastModified: null,
@@ -126,4 +126,3 @@ export async function moveObject(client: S3Client, connection: StoredConnection,
   await deleteObject(client, connection, sourceKey, isFolder)
   return sourceKeys.length
 }
-

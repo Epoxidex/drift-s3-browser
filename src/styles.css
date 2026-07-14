@@ -34,6 +34,7 @@ button { color: inherit; }
 .rotate-180 { transform: rotate(180deg); }
 .flip-y { transform: scaleY(-1); }
 @keyframes spin { to { transform: rotate(360deg); } }
+.app-loading { min-height: 100vh; display: flex; align-items: center; justify-content: center; gap: 12px; background: var(--cream); }.app-loading strong { font: 700 18px 'Manrope', sans-serif; }.app-loading > svg { color: var(--green); margin-left: 4px; }
 
 .primary-button, .secondary-button, .danger-button { height: 40px; border-radius: 10px; border: 0; padding: 0 16px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600; font-size: 13px; text-decoration: none; cursor: pointer; transition: .18s ease; }
 .primary-button { background: var(--green); color: white; box-shadow: 0 7px 16px rgba(24, 93, 72, .18); }
@@ -124,12 +125,14 @@ button { color: inherit; }
 .toolbar-view { height: 30px; display: flex; align-items: center; gap: 7px; color: #6e7671; font-size: 11px; padding: 0 8px; }
 .object-table { min-height: 0; flex: 1; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--line); overflow: hidden; }
 .object-table-head, .object-row { display: grid; grid-template-columns: minmax(270px, 1fr) 105px 130px 112px; align-items: center; }
+.with-preview .object-table-head, .with-preview .object-row { grid-template-columns: minmax(190px, 1fr) 70px 95px 78px; }
 .object-table-head { flex: none; height: 37px; padding: 0 15px; border-bottom: 1px solid var(--line); background: #f5f6f1; }
 .object-table-head button { width: max-content; padding: 0; display: flex; align-items: center; gap: 5px; border: 0; background: transparent; color: #8a918d; text-transform: uppercase; letter-spacing: .08em; font-size: 8px; font-weight: 700; cursor: pointer; }
 .object-table-body { min-height: 0; overflow: auto; flex: 1; }
 .object-row { position: relative; min-height: 57px; padding: 0 15px; border-bottom: 1px solid #eceee8; transition: .12s; }
 .object-row:hover, .object-row.selected { background: #f4f8f4; }.object-row.selected { box-shadow: inset 2px 0 var(--green); }
 .object-name { min-width: 0; height: 56px; display: flex; align-items: center; gap: 11px; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.object-name:focus { outline: none; }.object-name:focus-visible { outline: 2px solid #65a78a; outline-offset: -2px; border-radius: 8px; }
 .file-icon { width: 35px; height: 35px; flex: none; display: grid; place-items: center; color: #75817b; background: #f0f1ed; border-radius: 9px; }.file-icon.folder { color: #b88934; background: #fbf3df; }
 .object-name > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 3px; }.object-name strong { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }.object-name small { color: #a1a6a2; font-size: 9px; }
 .object-size, .object-date { color: #747c77; font-size: 10px; }
