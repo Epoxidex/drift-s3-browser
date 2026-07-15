@@ -67,6 +67,10 @@ export function contentUrl(key: string, download = false) {
   return `/api/objects/content?${params}`
 }
 
+export function archiveUrl(prefix: string) {
+  return `/api/objects/archive?${new URLSearchParams({ prefix })}`
+}
+
 export async function getTextPreview(key: string) {
   const response = await fetch(contentUrl(key), {
     headers: { 'x-s3-connection': connectionId, range: 'bytes=0-524287' },
@@ -90,10 +94,17 @@ export function createFolder(key: string) {
   return request<{ key: string }>('/api/objects/folder', { method: 'POST', body: JSON.stringify({ key }) })
 }
 
-export function uploadFile(prefix: string, file: File) {
+export function uploadFile(prefix: string, file: File, relativePath = file.name) {
   const form = new FormData()
   form.append('file', file)
-  return request<{ key: string }>(`/api/objects/upload?${new URLSearchParams({ prefix })}`, { method: 'POST', body: form })
+  return request<{ key: string }>(`/api/objects/upload?${new URLSearchParams({ prefix, relativePath })}`, { method: 'POST', body: form })
+}
+
+export function copyObject(item: S3Object, targetKey: string) {
+  return request<{ count: number }>('/api/objects/copy', {
+    method: 'POST',
+    body: JSON.stringify({ sourceKey: item.key, targetKey, type: item.type }),
+  })
 }
 
 export function moveObject(item: S3Object, targetKey: string) {

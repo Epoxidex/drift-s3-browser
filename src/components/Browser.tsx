@@ -1,16 +1,44 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from 'react'
 import {
   ArrowDownAZ, ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, Database, Download, File, FileArchive,
-  FileCode2, FileImage, FileText, Folder, FolderPlus, HardDrive, LayoutList, LoaderCircle, LogOut, MoreHorizontal,
-  Move, PackageOpen, Plus, RefreshCw, Search, Trash2, Upload, X,
+  FileCode2, FileImage, FileText, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutList, LoaderCircle,
+  LogOut, MoreHorizontal, Move, PackageOpen, RefreshCw, Scissors, Search, Trash2, Upload, X, Copy, ClipboardPaste,
 } from 'lucide-react'
-import { contentUrl, createFolder, deleteObject, listObjects, moveObject, uploadFile } from '../api'
+import { archiveUrl, contentUrl, copyObject, createFolder, deleteObject, listObjects, moveObject, uploadFile } from '../api'
 import type { Connection, S3Object } from '../types'
 import { Modal } from './Modal'
 import { PreviewPanel } from './PreviewPanel'
 
 type Props = { connection: Connection; onDisconnect: () => void }
 type Sort = 'name' | 'size' | 'date'
+type UploadEntry = { file: File; relativePath: string }
+type ClipboardState = { item: S3Object; operation: 'copy' | 'cut' }
+type ContextMenuState = { item: S3Object; x: number; y: number }
+
+interface FileSystemEntryLike {
+  isFile: boolean
+  isDirectory: boolean
+  name: string
+  file?: (callback: (file: File) => void, error?: (reason: unknown) => void) => void
+  createReader?: () => { readEntries: (callback: (entries: FileSystemEntryLike[]) => void, error?: (reason: unknown) => void) => void }
+}
+
+async function entryFiles(entry: FileSystemEntryLike, parent = ''): Promise<UploadEntry[]> {
+  const path = `${parent}${entry.name}`
+  if (entry.isFile && entry.file) {
+    const file = await new Promise<File>((resolve, reject) => entry.file?.(resolve, reject))
+    return [{ file, relativePath: path }]
+  }
+  if (!entry.isDirectory || !entry.createReader) return []
+  const reader = entry.createReader()
+  const children: FileSystemEntryLike[] = []
+  while (true) {
+    const page = await new Promise<FileSystemEntryLike[]>((resolve, reject) => reader.readEntries(resolve, reject))
+    if (!page.length) break
+    children.push(...page)
+  }
+  return (await Promise.all(children.map((child) => entryFiles(child, `${path}/`)))).flat()
+}
 
 function formatBytes(value: number) {
   if (!value) return '—'
@@ -51,7 +79,10 @@ export function Browser({ connection, onDisconnect }: Props) {
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState('')
   const [dragActive, setDragActive] = useState(false)
+  const [clipboard, setClipboard] = useState<ClipboardState | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const folderInput = useRef<HTMLInputElement>(null)
 
   const currentToken = tokens[tokens.length - 1]
 
@@ -64,6 +95,22 @@ export function Browser({ connection, onDisconnect }: Props) {
       .finally(() => current && setLoading(false))
     return () => { current = false }
   }, [prefix, currentToken, pageSize, refresh])
+
+  useEffect(() => {
+    folderInput.current?.setAttribute('webkitdirectory', '')
+  }, [])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    const closeOnEscape = (event: KeyboardEvent) => event.key === 'Escape' && close()
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [contextMenu])
 
   function showToast(message: string) {
     setToast(message)
@@ -93,15 +140,26 @@ export function Browser({ connection, onDisconnect }: Props) {
     return parts.map((name, index) => ({ name, prefix: `${parts.slice(0, index + 1).join('/')}/` }))
   }, [prefix])
 
-  async function doUpload(files: FileList | File[]) {
-    const list = Array.from(files)
+  async function doUpload(files: FileList | File[] | UploadEntry[]) {
+    const list: UploadEntry[] = Array.from(files as ArrayLike<File | UploadEntry>).map((value) => {
+      if ('relativePath' in value) return value
+      return { file: value, relativePath: value.webkitRelativePath || value.name }
+    })
     if (!list.length) return
     setBusy(true)
     try {
-      for (let index = 0; index < list.length; index += 1) {
-        showToast(`Загрузка ${index + 1} из ${list.length}: ${list[index].name}`)
-        await uploadFile(prefix, list[index])
-      }
+      let completed = 0
+      let cursor = 0
+      const workers = Array.from({ length: Math.min(4, list.length) }, async () => {
+        while (cursor < list.length) {
+          const index = cursor++
+          const entry = list[index]
+          await uploadFile(prefix, entry.file, entry.relativePath)
+          completed += 1
+          showToast(`Загружено ${completed} из ${list.length}`)
+        }
+      })
+      await Promise.all(workers)
       showToast(list.length === 1 ? 'Файл загружен' : `Загружено файлов: ${list.length}`)
       setRefresh((value) => value + 1)
     } catch (error) {
@@ -109,13 +167,61 @@ export function Browser({ connection, onDisconnect }: Props) {
     } finally {
       setBusy(false)
       if (fileInput.current) fileInput.current.value = ''
+      if (folderInput.current) folderInput.current.value = ''
     }
   }
 
-  function onDrop(event: DragEvent) {
+  async function onDrop(event: DragEvent) {
     event.preventDefault()
     setDragActive(false)
-    void doUpload(event.dataTransfer.files)
+    const entries = Array.from(event.dataTransfer.items)
+      .map((item) => (item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntryLike | null }).webkitGetAsEntry?.() as FileSystemEntryLike | null | undefined)
+      .filter(Boolean) as FileSystemEntryLike[]
+    if (entries.length) {
+      try {
+        const files = (await Promise.all(entries.map((entry) => entryFiles(entry)))).flat()
+        await doUpload(files)
+        return
+      } catch {
+        // The browser can deny directory traversal; the regular file list remains usable.
+      }
+    }
+    await doUpload(event.dataTransfer.files)
+  }
+
+  function showContextMenu(event: MouseEvent, item: S3Object) {
+    event.preventDefault()
+    event.stopPropagation()
+    setContextMenu({ item, x: Math.min(event.clientX, window.innerWidth - 220), y: Math.min(event.clientY, window.innerHeight - 300) })
+  }
+
+  function putOnClipboard(item: S3Object, operation: 'copy' | 'cut') {
+    setClipboard({ item, operation })
+    setContextMenu(null)
+    showToast(operation === 'copy' ? `Скопировано: ${item.name}` : `Вырезано: ${item.name}`)
+  }
+
+  async function pasteClipboard() {
+    if (!clipboard) return
+    const bareKey = clipboard.item.key.replace(/\/$/, '')
+    const name = bareKey.split('/').pop() || clipboard.item.name
+    const targetKey = `${prefix}${name}${clipboard.item.type === 'folder' ? '/' : ''}`
+    if (targetKey === clipboard.item.key) {
+      showToast('Источник уже находится в этой папке')
+      return
+    }
+    setBusy(true)
+    try {
+      if (clipboard.operation === 'copy') await copyObject(clipboard.item, targetKey)
+      else await moveObject(clipboard.item, targetKey)
+      showToast(clipboard.operation === 'copy' ? 'Объект скопирован' : 'Объект перемещён')
+      if (clipboard.operation === 'cut') setClipboard(null)
+      setRefresh((value) => value + 1)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось вставить объект')
+    } finally {
+      setBusy(false)
+    }
   }
 
   function openMove(item: S3Object) {
@@ -175,6 +281,7 @@ export function Browser({ connection, onDisconnect }: Props) {
         <nav className="sidebar-nav">
           <button className={!prefix ? 'active' : ''} onClick={() => openPrefix('')}><HardDrive size={17} /> Все файлы</button>
           <button onClick={() => fileInput.current?.click()}><Upload size={17} /> Загрузить</button>
+          <button onClick={() => folderInput.current?.click()}><FolderUp size={17} /> Загрузить папку</button>
         </nav>
         <div className="sidebar-spacer" />
         <div className="endpoint-note"><span>S3 endpoint</span><strong title={connection.endpoint}>{new URL(connection.endpoint).host}</strong><small>{connection.bucket}</small></div>
@@ -190,9 +297,12 @@ export function Browser({ connection, onDisconnect }: Props) {
             {crumbs.map((crumb, index) => <span key={crumb.prefix}><ChevronRight size={15} /><button className={index === crumbs.length - 1 ? 'current' : ''} onClick={() => openPrefix(crumb.prefix)}>{crumb.name}</button></span>)}
           </div>
           <div className="top-actions">
+            <button className="secondary-button paste-button" disabled={!clipboard || busy} onClick={() => void pasteClipboard()} title={clipboard ? `${clipboard.operation === 'copy' ? 'Копировать' : 'Переместить'} «${clipboard.item.name}» сюда` : 'Сначала скопируйте или вырежьте объект'}><ClipboardPaste size={17} /> Вставить</button>
             <button className="secondary-button" onClick={() => { setInputValue(''); setDialog('folder') }}><FolderPlus size={17} /> Новая папка</button>
+            <button className="secondary-button folder-upload-button" disabled={busy} onClick={() => folderInput.current?.click()}><FolderUp size={17} /> Папку</button>
             <button className="primary-button" disabled={busy} onClick={() => fileInput.current?.click()}><Upload size={17} /> Загрузить</button>
             <input ref={fileInput} type="file" multiple hidden onChange={(e) => e.target.files && void doUpload(e.target.files)} />
+            <input ref={folderInput} type="file" multiple hidden onChange={(e) => e.target.files && void doUpload(e.target.files)} />
           </div>
         </header>
 
@@ -218,17 +328,14 @@ export function Browser({ connection, onDisconnect }: Props) {
               {loading && <div className="table-state"><LoaderCircle className="spin" /><span>Загружаем объекты…</span></div>}
               {!loading && visibleItems.length === 0 && <div className="table-state empty"><PackageOpen size={38} strokeWidth={1.3} /><strong>{search ? 'Ничего не найдено' : 'Здесь пока пусто'}</strong><span>{search ? 'Попробуйте изменить запрос' : 'Перетащите файлы сюда или создайте папку'}</span></div>}
               {!loading && visibleItems.map((item) => (
-                <div key={item.key} className={`object-row ${preview?.key === item.key ? 'selected' : ''}`} onDoubleClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
+                <div key={item.key} className={`object-row ${preview?.key === item.key ? 'selected' : ''} ${clipboard?.item.key === item.key ? `clipboard-${clipboard.operation}` : ''}`} onContextMenu={(event) => showContextMenu(event, item)} onDoubleClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
                   <button className="object-name" onClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
                     <span className={`file-icon ${item.type}`}>{fileIcon(item)}</span><span><strong>{item.name}</strong><small>{item.type === 'folder' ? 'Папка' : item.name.split('.').pop()?.toUpperCase() || 'Файл'}</small></span>
                   </button>
                   <span className="object-size">{item.type === 'folder' ? '—' : formatBytes(item.size)}</span>
                   <span className="object-date">{item.lastModified ? new Intl.DateTimeFormat('ru', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(item.lastModified)) : '—'}</span>
                   <div className="row-actions">
-                    {item.type === 'file' && <a href={contentUrl(item.key, true)} title="Скачать"><Download size={16} /></a>}
-                    <button onClick={() => openMove(item)} title="Переместить или переименовать"><Move size={16} /></button>
-                    <button className="danger" onClick={() => openDelete(item)} title="Удалить"><Trash2 size={16} /></button>
-                    <MoreHorizontal className="more-placeholder" size={17} />
+                    <button className="more-button" onClick={(event) => showContextMenu(event, item)} title="Действия"><MoreHorizontal size={17} /></button>
                   </div>
                 </div>
               ))}
@@ -244,6 +351,18 @@ export function Browser({ connection, onDisconnect }: Props) {
       </main>
 
       {preview && <PreviewPanel item={preview} onClose={() => setPreview(null)} />}
+      {contextMenu && (
+        <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+          <button onClick={() => { contextMenu.item.type === 'folder' ? openPrefix(contextMenu.item.key) : setPreview(contextMenu.item); setContextMenu(null) }}><FolderInput size={16} />{contextMenu.item.type === 'folder' ? 'Открыть' : 'Предпросмотр'}</button>
+          <a href={contextMenu.item.type === 'folder' ? archiveUrl(contextMenu.item.key) : contentUrl(contextMenu.item.key, true)} onClick={() => setContextMenu(null)}><Download size={16} />{contextMenu.item.type === 'folder' ? 'Скачать ZIP' : 'Скачать'}</a>
+          <div className="context-separator" />
+          <button onClick={() => putOnClipboard(contextMenu.item, 'copy')}><Copy size={16} />Копировать</button>
+          <button onClick={() => putOnClipboard(contextMenu.item, 'cut')}><Scissors size={16} />Вырезать</button>
+          <button onClick={() => { openMove(contextMenu.item); setContextMenu(null) }}><Move size={16} />Переименовать / переместить</button>
+          <div className="context-separator" />
+          <button className="danger" onClick={() => { openDelete(contextMenu.item); setContextMenu(null) }}><Trash2 size={16} />Удалить</button>
+        </div>
+      )}
       {dragActive && <div className="drop-overlay" onDragLeave={() => setDragActive(false)}><div><Upload size={32} /><strong>Отпустите, чтобы загрузить</strong><span>Файлы попадут в текущую папку</span></div></div>}
       {toast && <div className="toast">{busy && <LoaderCircle className="spin" size={16} />}{toast}</div>}
 
