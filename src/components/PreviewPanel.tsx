@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { Braces, Download, File, FileText, Image as ImageIcon, Info, LoaderCircle, X } from 'lucide-react'
+import { Braces, Download, File, FileText, Image as ImageIcon, Info, LoaderCircle, Maximize2, Minimize2, X } from 'lucide-react'
 import { contentUrl, getBinaryPreview, getObjectMeta, getTextPreview } from '../api'
 import type { ObjectMeta, S3Object } from '../types'
 
@@ -26,6 +26,7 @@ export function PreviewPanel({ item, onClose }: { item: S3Object; onClose: () =>
   const [pdfData, setPdfData] = useState<Uint8Array<ArrayBuffer> | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [maximized, setMaximized] = useState(false)
   const kind = previewKind(item, meta)
 
   useEffect(() => {
@@ -44,17 +45,20 @@ export function PreviewPanel({ item, onClose }: { item: S3Object; onClose: () =>
   }, [item])
 
   return (
-    <aside className="preview-panel">
+    <aside className={`preview-panel ${maximized ? 'maximized' : ''}`}>
       <header className="preview-header">
         <div className="preview-title-icon">{kind === 'image' ? <ImageIcon size={18} /> : kind === 'text' ? <Braces size={18} /> : <File size={18} />}</div>
         <div><strong title={item.name}>{item.name}</strong><span>Предпросмотр</span></div>
-        <button className="icon-button" onClick={onClose}><X size={19} /></button>
+        <div className="preview-header-actions">
+          <button className="icon-button" onClick={() => setMaximized((value) => !value)} title={maximized ? 'Свернуть предпросмотр' : 'Развернуть предпросмотр'}>{maximized ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</button>
+          <button className="icon-button" onClick={onClose} title="Закрыть"><X size={19} /></button>
+        </div>
       </header>
 
       <div className={`preview-stage preview-${kind}`}>
         {loading && <div className="preview-state"><LoaderCircle className="spin" /><span>Открываем файл…</span></div>}
         {!loading && error && <div className="preview-state"><Info /><span>{error}</span></div>}
-        {!loading && !error && kind === 'image' && <img src={contentUrl(item.key)} alt={item.name} />}
+        {!loading && !error && kind === 'image' && <img src={contentUrl(item.key)} alt={item.name} onDoubleClick={() => setMaximized(true)} title="Двойной щелчок — развернуть" />}
         {!loading && !error && kind === 'pdf' && pdfData && (
           <Suspense fallback={<div className="preview-state"><LoaderCircle className="spin" /><span>Готовим просмотрщик…</span></div>}>
             <PdfPreview data={pdfData} fileName={item.name} />
