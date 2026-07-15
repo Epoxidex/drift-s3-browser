@@ -3,6 +3,7 @@ import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3'
 import type { ConnectionInput, ConnectionSummary, StoredConnection } from './types.js'
 
 const connections = new Map<string, StoredConnection>()
+const clients = new Map<string, S3Client>()
 
 function assertText(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -45,6 +46,14 @@ export function createClient(connection: StoredConnection) {
       secretAccessKey: connection.secretAccessKey,
     },
   })
+}
+
+export function getClient(connection: StoredConnection) {
+  const existing = clients.get(connection.id)
+  if (existing) return existing
+  const client = createClient(connection)
+  clients.set(connection.id, client)
+  return client
 }
 
 function summary(connection: StoredConnection): ConnectionSummary {
@@ -102,7 +111,13 @@ export function listConnections() {
 export function removeConnection(id: string) {
   const connection = connections.get(id)
   if (!connection || connection.isDefault) return false
+  clients.get(id)?.destroy()
+  clients.delete(id)
   connections.delete(id)
   return true
 }
 
+export function destroyClients() {
+  for (const client of clients.values()) client.destroy()
+  clients.clear()
+}

@@ -1,6 +1,6 @@
 import { CopyObjectCommand, DeleteObjectsCommand, ListObjectsV2Command, type S3Client } from '@aws-sdk/client-s3'
 import { describe, expect, it, vi } from 'vitest'
-import { deleteObject, listObjects, moveObject } from './s3-service.js'
+import { copyObject, deleteObject, listObjects, moveObject } from './s3-service.js'
 import type { StoredConnection } from './types.js'
 
 const connection: StoredConnection = {
@@ -49,6 +49,26 @@ describe('listObjects', () => {
 })
 
 describe('mutating operations', () => {
+  it('copies a folder tree while preserving relative paths', async () => {
+    const commands: unknown[] = []
+    const client = fakeClient((command) => {
+      commands.push(command)
+      if (command instanceof ListObjectsV2Command) return { Contents: [{ Key: 'old/' }, { Key: 'old/nested/file.txt' }] }
+      return {}
+    })
+
+    expect(await copyObject(client, connection, 'old/', 'new/', true)).toBe(2)
+    const copies = commands.filter((command): command is CopyObjectCommand => command instanceof CopyObjectCommand)
+    expect(copies.map((command) => command.input.Key)).toEqual(['new/', 'new/nested/file.txt'])
+    expect(commands.some((command) => command instanceof DeleteObjectsCommand)).toBe(false)
+  })
+
+  it('rejects copying a folder into itself', async () => {
+    const client = fakeClient(() => ({}))
+    await expect(copyObject(client, connection, 'old/', 'old/nested/', true)).rejects.toThrow('самой себя')
+    expect(client.send).not.toHaveBeenCalled()
+  })
+
   it('moves a folder only after every object was copied', async () => {
     const commands: unknown[] = []
     const client = fakeClient((command) => {
@@ -81,4 +101,3 @@ describe('mutating operations', () => {
     expect(batches.map((command) => command.input.Delete?.Objects?.length)).toEqual([1000, 1])
   })
 })
-

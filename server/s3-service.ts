@@ -9,7 +9,9 @@ import {
   type S3Client,
 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
-import type { Readable } from 'node:stream'
+import archiver from 'archiver'
+import { once } from 'node:events'
+import { PassThrough, type Readable } from 'node:stream'
 import type { StoredConnection } from './types.js'
 
 export type ObjectItem = {
@@ -62,6 +64,45 @@ export async function getObject(client: S3Client, connection: StoredConnection, 
   return client.send(new GetObjectCommand({ Bucket: connection.bucket, Key: key, Range: range }))
 }
 
+function safeArchivePath(value: string) {
+  return value.split('/').filter(Boolean).map((part) => part === '..' || part === '.' ? '_' : part).join('/')
+}
+
+export async function createFolderArchive(client: S3Client, connection: StoredConnection, prefix: string) {
+  const keys = await listAllKeys(client, connection, prefix)
+  const output = new PassThrough()
+  const archive = archiver('zip', { zlib: { level: 6 } })
+  const rootName = safeArchivePath(prefix.replace(/\/$/, '').split('/').pop() || 'bucket')
+
+  archive.on('warning', (error) => {
+    if (error.code !== 'ENOENT') output.destroy(error)
+  })
+  archive.on('error', (error) => output.destroy(error))
+  archive.pipe(output)
+
+  void (async () => {
+    archive.append('', { name: `${rootName}/` })
+    for (const key of keys) {
+      const relativePath = safeArchivePath(key.slice(prefix.length))
+      if (!relativePath) continue
+      const archivePath = `${rootName}/${relativePath}${key.endsWith('/') ? '/' : ''}`
+      if (key.endsWith('/')) {
+        archive.append('', { name: archivePath })
+        continue
+      }
+      const object = await getObject(client, connection, key)
+      const body = object.Body as Readable | undefined
+      if (!body) throw new Error(`S3 вернул пустой поток для ${key}`)
+      const completed = once(body, 'end')
+      archive.append(body, { name: archivePath, date: object.LastModified })
+      await completed
+    }
+    await archive.finalize()
+  })().catch((error) => output.destroy(error instanceof Error ? error : new Error('Не удалось создать ZIP-архив')))
+
+  return { stream: output, count: keys.length, filename: `${rootName}.zip` }
+}
+
 export async function uploadObject(client: S3Client, connection: StoredConnection, key: string, body: Readable, contentType: string) {
   const upload = new Upload({
     client,
@@ -77,7 +118,7 @@ export async function createFolder(client: S3Client, connection: StoredConnectio
   await client.send(new PutObjectCommand({ Bucket: connection.bucket, Key: folderKey, Body: '' }))
 }
 
-async function listAllKeys(client: S3Client, connection: StoredConnection, prefix: string) {
+export async function listAllKeys(client: S3Client, connection: StoredConnection, prefix: string) {
   const keys: string[] = []
   let token: string | undefined
   do {
@@ -94,13 +135,17 @@ export async function deleteObject(client: S3Client, connection: StoredConnectio
     return 1
   }
   const keys = await listAllKeys(client, connection, key)
+  await deleteKeys(client, connection, keys)
+  return keys.length
+}
+
+async function deleteKeys(client: S3Client, connection: StoredConnection, keys: string[]) {
   for (let index = 0; index < keys.length; index += 1000) {
     await client.send(new DeleteObjectsCommand({
       Bucket: connection.bucket,
       Delete: { Objects: keys.slice(index, index + 1000).map((Key) => ({ Key })), Quiet: true },
     }))
   }
-  return keys.length
 }
 
 function encodeCopySource(bucket: string, key: string) {
@@ -108,21 +153,36 @@ function encodeCopySource(bucket: string, key: string) {
 }
 
 export async function moveObject(client: S3Client, connection: StoredConnection, sourceKey: string, targetKey: string, isFolder: boolean) {
-  if (sourceKey === targetKey) return 0
-  if (isFolder && targetKey.startsWith(sourceKey)) throw new Error('Нельзя переместить папку внутрь самой себя')
-
+  if (!validateCopyTarget(sourceKey, targetKey, isFolder)) return 0
   const sourceKeys = isFolder ? await listAllKeys(client, connection, sourceKey) : [sourceKey]
+  await copyKeys(client, connection, sourceKeys, sourceKey, targetKey, isFolder)
+  if (isFolder) await deleteKeys(client, connection, sourceKeys)
+  else await client.send(new DeleteObjectCommand({ Bucket: connection.bucket, Key: sourceKey }))
+  return sourceKeys.length
+}
+
+export async function copyObject(client: S3Client, connection: StoredConnection, sourceKey: string, targetKey: string, isFolder: boolean) {
+  if (!validateCopyTarget(sourceKey, targetKey, isFolder)) return 0
+  const sourceKeys = isFolder ? await listAllKeys(client, connection, sourceKey) : [sourceKey]
+  await copyKeys(client, connection, sourceKeys, sourceKey, targetKey, isFolder)
+  return sourceKeys.length
+}
+
+function validateCopyTarget(sourceKey: string, targetKey: string, isFolder: boolean) {
+  if (sourceKey === targetKey) return false
+  if (isFolder && targetKey.startsWith(sourceKey)) throw new Error('Нельзя скопировать папку внутрь самой себя')
+  return true
+}
+
+async function copyKeys(client: S3Client, connection: StoredConnection, sourceKeys: string[], sourceKey: string, targetKey: string, isFolder: boolean) {
   const targetPrefix = isFolder ? (targetKey.endsWith('/') ? targetKey : `${targetKey}/`) : targetKey
   const sourcePrefix = isFolder ? sourceKey : ''
 
-  for (let index = 0; index < sourceKeys.length; index += 5) {
-    await Promise.all(sourceKeys.slice(index, index + 5).map((key) => client.send(new CopyObjectCommand({
+  for (let index = 0; index < sourceKeys.length; index += 8) {
+    await Promise.all(sourceKeys.slice(index, index + 8).map((key) => client.send(new CopyObjectCommand({
       Bucket: connection.bucket,
       Key: isFolder ? `${targetPrefix}${key.slice(sourcePrefix.length)}` : targetPrefix,
       CopySource: encodeCopySource(connection.bucket, key),
     }))))
   }
-
-  await deleteObject(client, connection, sourceKey, isFolder)
-  return sourceKeys.length
 }

@@ -7,8 +7,8 @@ import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
 import Fastify, { type FastifyRequest } from 'fastify'
 import { lookup as lookupMime } from 'mime-types'
-import { addConnection, addDefaultConnectionFromEnv, createClient, getConnection, listConnections, parseConnection, removeConnection } from './connection-store.js'
-import { createFolder, deleteObject, getObject, headObject, listObjects, moveObject, uploadObject } from './s3-service.js'
+import { addConnection, addDefaultConnectionFromEnv, getClient, getConnection, listConnections, parseConnection, removeConnection } from './connection-store.js'
+import { copyObject, createFolder, createFolderArchive, deleteObject, getObject, headObject, listObjects, moveObject, uploadObject } from './s3-service.js'
 
 type Query = Record<string, string | undefined>
 
@@ -65,37 +65,27 @@ export async function buildApp() {
 
   app.get<{ Querystring: Query }>('/api/objects', async (request) => {
     const connection = requireConnection(request)
-    const client = createClient(connection)
-    try {
-      return await listObjects(client, connection, request.query.prefix ?? '', request.query.token, Number(request.query.pageSize) || 50)
-    } finally {
-      client.destroy()
-    }
+    return listObjects(getClient(connection), connection, request.query.prefix ?? '', request.query.token, Number(request.query.pageSize) || 50)
   })
 
   app.get<{ Querystring: Query }>('/api/objects/meta', async (request) => {
     const connection = requireConnection(request)
     const key = requiredString(request.query.key, 'key')
-    const client = createClient(connection)
-    try {
-      const result = await headObject(client, connection, key)
-      return {
-        key,
-        size: result.ContentLength ?? 0,
-        contentType: result.ContentType || lookupMime(key) || 'application/octet-stream',
-        lastModified: result.LastModified?.toISOString() ?? null,
-        etag: result.ETag?.replaceAll('"', '') ?? null,
-        metadata: result.Metadata ?? {},
-      }
-    } finally {
-      client.destroy()
+    const result = await headObject(getClient(connection), connection, key)
+    return {
+      key,
+      size: result.ContentLength ?? 0,
+      contentType: result.ContentType || lookupMime(key) || 'application/octet-stream',
+      lastModified: result.LastModified?.toISOString() ?? null,
+      etag: result.ETag?.replaceAll('"', '') ?? null,
+      metadata: result.Metadata ?? {},
     }
   })
 
   app.get<{ Querystring: Query }>('/api/objects/content', async (request, reply) => {
     const connection = requireConnection(request)
     const key = requiredString(request.query.key, 'key')
-    const client = createClient(connection)
+    const client = getClient(connection)
     const result = await getObject(client, connection, key, request.headers.range)
     const filename = key.split('/').pop() || 'download'
     const detectedType = result.ContentType || lookupMime(key) || 'application/octet-stream'
@@ -112,21 +102,20 @@ export async function buildApp() {
 
     const stream = result.Body as Readable | undefined
     if (!stream) {
-      client.destroy()
       return reply.code(502).send({ error: 'S3 вернул пустой поток' })
     }
 
-    let disposed = false
-    const disposeClient = () => {
-      if (disposed) return
-      disposed = true
-      client.destroy()
-    }
-    stream.once('end', disposeClient)
-    stream.once('close', disposeClient)
-    stream.once('error', disposeClient)
-
     return reply.send(stream)
+  })
+
+  app.get<{ Querystring: Query }>('/api/objects/archive', async (request, reply) => {
+    const connection = requireConnection(request)
+    const prefix = requiredString(request.query.prefix, 'prefix')
+    const result = await createFolderArchive(getClient(connection), connection, prefix)
+    reply.header('content-type', 'application/zip')
+    reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`)
+    reply.header('x-archive-object-count', result.count)
+    return reply.send(result.stream)
   })
 
   app.post<{ Querystring: Query }>('/api/objects/upload', async (request, reply) => {
@@ -134,27 +123,31 @@ export async function buildApp() {
     const prefix = request.query.prefix ?? ''
     const part = await request.file()
     if (!part) return reply.code(400).send({ error: 'Файл не передан' })
-    const key = `${prefix}${part.filename}`
-    const client = createClient(connection)
-    try {
-      await uploadObject(client, connection, key, part.file, part.mimetype)
-      return reply.code(201).send({ key })
-    } finally {
-      client.destroy()
-    }
+    const relativePath = (request.query.relativePath || part.filename)
+      .replaceAll('\\', '/')
+      .split('/')
+      .filter((segment) => segment && segment !== '.' && segment !== '..')
+      .join('/')
+    if (!relativePath) return reply.code(400).send({ error: 'Некорректный путь файла' })
+    const key = `${prefix}${relativePath}`
+    await uploadObject(getClient(connection), connection, key, part.file, part.mimetype)
+    return reply.code(201).send({ key })
   })
 
   app.post('/api/objects/folder', async (request, reply) => {
     const connection = requireConnection(request)
     const body = request.body as Record<string, unknown>
     const key = requiredString(body?.key, 'key')
-    const client = createClient(connection)
-    try {
-      await createFolder(client, connection, key)
-      return reply.code(201).send({ key: key.endsWith('/') ? key : `${key}/` })
-    } finally {
-      client.destroy()
-    }
+    await createFolder(getClient(connection), connection, key)
+    return reply.code(201).send({ key: key.endsWith('/') ? key : `${key}/` })
+  })
+
+  app.post('/api/objects/copy', async (request) => {
+    const connection = requireConnection(request)
+    const body = request.body as Record<string, unknown>
+    const sourceKey = requiredString(body?.sourceKey, 'sourceKey')
+    const targetKey = requiredString(body?.targetKey, 'targetKey')
+    return { count: await copyObject(getClient(connection), connection, sourceKey, targetKey, body?.type === 'folder') }
   })
 
   app.post('/api/objects/move', async (request) => {
@@ -162,24 +155,14 @@ export async function buildApp() {
     const body = request.body as Record<string, unknown>
     const sourceKey = requiredString(body?.sourceKey, 'sourceKey')
     const targetKey = requiredString(body?.targetKey, 'targetKey')
-    const client = createClient(connection)
-    try {
-      return { count: await moveObject(client, connection, sourceKey, targetKey, body?.type === 'folder') }
-    } finally {
-      client.destroy()
-    }
+    return { count: await moveObject(getClient(connection), connection, sourceKey, targetKey, body?.type === 'folder') }
   })
 
   app.delete('/api/objects', async (request) => {
     const connection = requireConnection(request)
     const body = request.body as Record<string, unknown>
     const key = requiredString(body?.key, 'key')
-    const client = createClient(connection)
-    try {
-      return { count: await deleteObject(client, connection, key, body?.type === 'folder') }
-    } finally {
-      client.destroy()
-    }
+    return { count: await deleteObject(getClient(connection), connection, key, body?.type === 'folder') }
   })
 
   app.setErrorHandler((error, _request, reply) => {
