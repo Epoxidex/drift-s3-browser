@@ -9,7 +9,7 @@ import {
   type S3Client,
 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
-import archiver from 'archiver'
+import * as archiverModule from 'archiver'
 import { once } from 'node:events'
 import { PassThrough, type Readable } from 'node:stream'
 import type { StoredConnection } from './types.js'
@@ -71,7 +71,10 @@ function safeArchivePath(value: string) {
 export async function createFolderArchive(client: S3Client, connection: StoredConnection, prefix: string) {
   const keys = await listAllKeys(client, connection, prefix)
   const output = new PassThrough()
-  const archive = archiver('zip', { zlib: { level: 6 } })
+  const ZipArchive = (archiverModule as unknown as {
+    ZipArchive: new(options?: archiverModule.ArchiverOptions) => archiverModule.Archiver
+  }).ZipArchive
+  const archive = new ZipArchive({ zlib: { level: 6 } })
   const rootName = safeArchivePath(prefix.replace(/\/$/, '').split('/').pop() || 'bucket')
 
   archive.on('warning', (error) => {
