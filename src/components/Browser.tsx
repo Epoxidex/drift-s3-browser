@@ -12,7 +12,7 @@ import { PreviewPanel } from './PreviewPanel'
 type Props = { connection: Connection; onDisconnect: () => void }
 type Sort = 'name' | 'size' | 'date'
 type UploadEntry = { file: File; relativePath: string }
-type ClipboardState = { item: S3Object; operation: 'copy' | 'cut' }
+type ClipboardState = { items: S3Object[]; operation: 'copy' | 'cut' }
 type ContextMenuState = { item: S3Object; x: number; y: number }
 type OperationProgress = { label: string; completed: number; total: number }
 
@@ -82,10 +82,13 @@ export function Browser({ connection, onDisconnect }: Props) {
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null)
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set())
+  const [deleteItems, setDeleteItems] = useState<S3Object[]>([])
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
   const toastTimer = useRef<number | null>(null)
+  const selectAllInput = useRef<HTMLInputElement>(null)
 
   const currentToken = tokens[tokens.length - 1]
 
@@ -133,6 +136,7 @@ export function Browser({ connection, onDisconnect }: Props) {
     setTokens([null])
     setSearch('')
     setPreview(null)
+    setSelectedKeys(new Set())
   }
 
   const visibleItems = useMemo(() => {
@@ -145,6 +149,13 @@ export function Browser({ connection, onDisconnect }: Props) {
       return a.name.localeCompare(b.name, 'ru', { numeric: true }) * direction
     })
   }, [items, search, sort, sortAsc])
+
+  const selectedItems = useMemo(() => items.filter((item) => selectedKeys.has(item.key)), [items, selectedKeys])
+  const allVisibleSelected = visibleItems.length > 0 && visibleItems.every((item) => selectedKeys.has(item.key))
+
+  useEffect(() => {
+    if (selectAllInput.current) selectAllInput.current.indeterminate = selectedItems.length > 0 && !allVisibleSelected
+  }, [allVisibleSelected, selectedItems.length])
 
   const crumbs = useMemo(() => {
     const parts = prefix.split('/').filter(Boolean)
@@ -207,38 +218,76 @@ export function Browser({ connection, onDisconnect }: Props) {
   function showContextMenu(event: MouseEvent, item: S3Object) {
     event.preventDefault()
     event.stopPropagation()
+    if (!selectedKeys.has(item.key)) setSelectedKeys(new Set([item.key]))
     setContextMenu({ item, x: Math.min(event.clientX, window.innerWidth - 220), y: Math.min(event.clientY, window.innerHeight - 300) })
   }
 
-  function putOnClipboard(item: S3Object, operation: 'copy' | 'cut') {
-    setClipboard({ item, operation })
+  function toggleSelection(item: S3Object, checked: boolean) {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      if (checked) next.add(item.key)
+      else next.delete(item.key)
+      return next
+    })
+  }
+
+  function toggleAllVisible(checked: boolean) {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      visibleItems.forEach((item) => checked ? next.add(item.key) : next.delete(item.key))
+      return next
+    })
+  }
+
+  function actionItems(item: S3Object) {
+    return selectedKeys.has(item.key) ? selectedItems : [item]
+  }
+
+  function putOnClipboard(itemsToStore: S3Object[], operation: 'copy' | 'cut') {
+    if (!itemsToStore.length) return
+    setClipboard({ items: itemsToStore, operation })
     setContextMenu(null)
-    showToast(operation === 'copy' ? `Скопировано: ${item.name}` : `Вырезано: ${item.name}`)
+    showToast(itemsToStore.length === 1
+      ? `${operation === 'copy' ? 'Скопировано' : 'Вырезано'}: ${itemsToStore[0].name}`
+      : `${operation === 'copy' ? 'Скопировано' : 'Вырезано'} объектов: ${itemsToStore.length}`)
   }
 
   async function pasteClipboard() {
     if (!clipboard) return
-    const bareKey = clipboard.item.key.replace(/\/$/, '')
-    const name = bareKey.split('/').pop() || clipboard.item.name
-    const targetKey = `${prefix}${name}${clipboard.item.type === 'folder' ? '/' : ''}`
-    if (targetKey === clipboard.item.key) {
+    const transfers = clipboard.items.map((item) => {
+      const bareKey = item.key.replace(/\/$/, '')
+      const name = bareKey.split('/').pop() || item.name
+      return { item, targetKey: `${prefix}${name}${item.type === 'folder' ? '/' : ''}` }
+    })
+    if (transfers.some(({ item, targetKey }) => targetKey === item.key)) {
       showToast('Источник уже находится в этой папке')
       return
     }
     setBusy(true)
     setOperationProgress({ label: clipboard.operation === 'copy' ? 'Подготовка к копированию' : 'Подготовка к переносу', completed: 0, total: 1 })
+    let completedTransfers = 0
     try {
-      const updateProgress = (progress: TransferProgress) => setOperationProgress({
-        label: progress.phase === 'copying' ? `Копирование «${clipboard.item.name}»` : `Удаление исходников «${clipboard.item.name}»`,
-        completed: progress.completed,
-        total: progress.total,
-      })
-      if (clipboard.operation === 'copy') await copyObject(clipboard.item, targetKey, updateProgress)
-      else await moveObject(clipboard.item, targetKey, updateProgress)
-      showToast(clipboard.operation === 'copy' ? 'Объект скопирован' : 'Объект перемещён')
+      for (let index = 0; index < transfers.length; index += 1) {
+        const { item, targetKey } = transfers[index]
+        const itemPosition = transfers.length > 1 ? ` (${index + 1} из ${transfers.length})` : ''
+        const updateProgress = (progress: TransferProgress) => setOperationProgress({
+          label: `${progress.phase === 'copying' ? 'Копирование' : 'Удаление исходников'} «${item.name}»${itemPosition}`,
+          completed: progress.completed,
+          total: progress.total,
+        })
+        if (clipboard.operation === 'copy') await copyObject(item, targetKey, updateProgress)
+        else await moveObject(item, targetKey, updateProgress)
+        completedTransfers += 1
+      }
+      showToast(clipboard.items.length === 1
+        ? (clipboard.operation === 'copy' ? 'Объект скопирован' : 'Объект перемещён')
+        : `${clipboard.operation === 'copy' ? 'Скопировано' : 'Перемещено'} объектов: ${clipboard.items.length}`)
       if (clipboard.operation === 'cut') setClipboard(null)
+      setSelectedKeys(new Set())
       setRefresh((value) => value + 1)
     } catch (error) {
+      if (clipboard.operation === 'cut' && completedTransfers > 0) setClipboard({ ...clipboard, items: clipboard.items.slice(completedTransfers) })
+      if (completedTransfers > 0) setRefresh((value) => value + 1)
       showToast(error instanceof Error ? error.message : 'Не удалось вставить объект')
     } finally {
       setOperationProgress(null)
@@ -252,13 +301,14 @@ export function Browser({ connection, onDisconnect }: Props) {
     setDialog('move')
   }
 
-  function openDelete(item: S3Object) {
-    setActiveItem(item)
+  function openDelete(itemsToDelete: S3Object[]) {
+    setDeleteItems(itemsToDelete)
     setDialog('delete')
   }
 
   async function submitDialog() {
     setBusy(true)
+    const deletedKeys = new Set<string>()
     try {
       if (dialog === 'folder') {
         const name = cleanName(inputValue)
@@ -276,14 +326,27 @@ export function Browser({ connection, onDisconnect }: Props) {
         }))
         if (preview?.key === activeItem.key) setPreview(null)
         showToast('Объект перемещён')
-      } else if (dialog === 'delete' && activeItem) {
-        await deleteObject(activeItem)
-        if (preview?.key === activeItem.key) setPreview(null)
-        showToast(activeItem.type === 'folder' ? 'Папка удалена' : 'Файл удалён')
+      } else if (dialog === 'delete' && deleteItems.length) {
+        setOperationProgress({ label: 'Удаление объектов', completed: 0, total: deleteItems.length })
+        for (let index = 0; index < deleteItems.length; index += 1) {
+          await deleteObject(deleteItems[index])
+          deletedKeys.add(deleteItems[index].key)
+          setOperationProgress({ label: 'Удаление объектов', completed: index + 1, total: deleteItems.length })
+        }
+        if (preview && deleteItems.some((item) => item.key === preview.key)) setPreview(null)
+        showToast(deleteItems.length === 1
+          ? (deleteItems[0].type === 'folder' ? 'Папка удалена' : 'Файл удалён')
+          : `Удалено объектов: ${deleteItems.length}`)
+        setSelectedKeys(new Set())
       }
       setDialog(null)
       setRefresh((value) => value + 1)
     } catch (error) {
+      if (deletedKeys.size) {
+        setDeleteItems((current) => current.filter((item) => !deletedKeys.has(item.key)))
+        setSelectedKeys((current) => new Set([...current].filter((key) => !deletedKeys.has(key))))
+        setRefresh((value) => value + 1)
+      }
       showToast(error instanceof Error ? error.message : 'Операция не выполнена')
     } finally {
       setOperationProgress(null)
@@ -325,7 +388,7 @@ export function Browser({ connection, onDisconnect }: Props) {
             {crumbs.map((crumb, index) => <span key={crumb.prefix}><ChevronRight size={15} /><button className={index === crumbs.length - 1 ? 'current' : ''} onClick={() => openPrefix(crumb.prefix)}>{crumb.name}</button></span>)}
           </div>
           <div className="top-actions">
-            <button className="secondary-button paste-button" disabled={!clipboard || busy} onClick={() => void pasteClipboard()} title={clipboard ? `${clipboard.operation === 'copy' ? 'Копировать' : 'Переместить'} «${clipboard.item.name}» сюда` : 'Сначала скопируйте или вырежьте объект'}><ClipboardPaste size={17} /> Вставить</button>
+            <button className="secondary-button paste-button" disabled={!clipboard || busy} onClick={() => void pasteClipboard()} title={clipboard ? `${clipboard.operation === 'copy' ? 'Копировать' : 'Переместить'} сюда: ${clipboard.items.length}` : 'Сначала скопируйте или вырежьте объекты'}><ClipboardPaste size={17} /> Вставить{clipboard && clipboard.items.length > 1 ? ` (${clipboard.items.length})` : ''}</button>
             <button className="secondary-button" onClick={() => { setInputValue(''); setDialog('folder') }}><FolderPlus size={17} /> Новая папка</button>
             <button className="secondary-button folder-upload-button" disabled={busy} onClick={() => folderInput.current?.click()}><FolderUp size={17} /> Папку</button>
             <button className="primary-button" disabled={busy} onClick={() => fileInput.current?.click()}><Upload size={17} /> Загрузить</button>
@@ -342,12 +405,15 @@ export function Browser({ connection, onDisconnect }: Props) {
 
           <div className="object-toolbar">
             <label className="search-box"><Search size={17} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Найти на странице" />{search && <button onClick={() => setSearch('')}><X size={15} /></button>}</label>
-            <div className="toolbar-view"><LayoutList size={17} /><span>Список</span></div>
+            <div className="toolbar-actions">
+              {selectedItems.length > 0 && <><span className="selection-count">Выбрано: {selectedItems.length}</span><button disabled={busy} onClick={() => putOnClipboard(selectedItems, 'copy')}><Copy size={15} />Копировать</button><button disabled={busy} onClick={() => putOnClipboard(selectedItems, 'cut')}><Scissors size={15} />Вырезать</button><button className="danger" disabled={busy} onClick={() => openDelete(selectedItems)}><Trash2 size={15} />Удалить</button></>}
+              <div className="toolbar-view"><LayoutList size={17} /><span>Список</span></div>
+            </div>
           </div>
 
           <div className="object-table">
             <div className="object-table-head">
-              <button onClick={() => changeSort('name')}>Название {sort === 'name' && <ArrowDownAZ className={!sortAsc ? 'flip-y' : ''} size={15} />}</button>
+              <div className="object-name-head"><label className="selection-checkbox" title="Выбрать всё на странице"><input ref={selectAllInput} type="checkbox" aria-label="Выбрать всё на странице" checked={allVisibleSelected} onChange={(event) => toggleAllVisible(event.target.checked)} /><span /></label><button onClick={() => changeSort('name')}>Название {sort === 'name' && <ArrowDownAZ className={!sortAsc ? 'flip-y' : ''} size={15} />}</button></div>
               <button onClick={() => changeSort('size')}>Размер</button>
               <button onClick={() => changeSort('date')}>Изменён</button>
               <span />
@@ -356,10 +422,13 @@ export function Browser({ connection, onDisconnect }: Props) {
               {loading && <div className="table-state"><LoaderCircle className="spin" /><span>Загружаем объекты…</span></div>}
               {!loading && visibleItems.length === 0 && <div className="table-state empty"><PackageOpen size={38} strokeWidth={1.3} /><strong>{search ? 'Ничего не найдено' : 'Здесь пока пусто'}</strong><span>{search ? 'Попробуйте изменить запрос' : 'Перетащите файлы сюда или создайте папку'}</span></div>}
               {!loading && visibleItems.map((item) => (
-                <div key={item.key} className={`object-row ${preview?.key === item.key ? 'selected' : ''} ${clipboard?.item.key === item.key ? `clipboard-${clipboard.operation}` : ''}`} onContextMenu={(event) => showContextMenu(event, item)} onDoubleClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
-                  <button className="object-name" onClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
-                    <span className={`file-icon ${item.type}`}>{fileIcon(item)}</span><span><strong>{item.name}</strong><small>{item.type === 'folder' ? 'Папка' : item.name.split('.').pop()?.toUpperCase() || 'Файл'}</small></span>
-                  </button>
+                <div key={item.key} className={`object-row ${preview?.key === item.key || selectedKeys.has(item.key) ? 'selected' : ''} ${clipboard?.items.some((clipboardItem) => clipboardItem.key === item.key) ? `clipboard-${clipboard.operation}` : ''}`} onContextMenu={(event) => showContextMenu(event, item)} onDoubleClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
+                  <div className="object-name-cell">
+                    <label className="selection-checkbox" title={`Выбрать ${item.name}`} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Выбрать ${item.name}`} checked={selectedKeys.has(item.key)} onChange={(event) => toggleSelection(item, event.target.checked)} /><span /></label>
+                    <button className="object-name" onClick={() => item.type === 'folder' ? openPrefix(item.key) : setPreview(item)}>
+                      <span className={`file-icon ${item.type}`}>{fileIcon(item)}</span><span><strong>{item.name}</strong><small>{item.type === 'folder' ? 'Папка' : item.name.split('.').pop()?.toUpperCase() || 'Файл'}</small></span>
+                    </button>
+                  </div>
                   <span className="object-size">{item.type === 'folder' ? '—' : formatBytes(item.size)}</span>
                   <span className="object-date">{item.lastModified ? new Intl.DateTimeFormat('ru', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(item.lastModified)) : '—'}</span>
                   <div className="row-actions">
@@ -371,9 +440,9 @@ export function Browser({ connection, onDisconnect }: Props) {
           </div>
 
           <footer className="pagination">
-            <label>Показывать <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setTokens([null]) }}><option>25</option><option>50</option><option>100</option><option>200</option></select><ChevronDown size={14} /></label>
+            <label>Показывать <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setTokens([null]); setSelectedKeys(new Set()) }}><option>25</option><option>50</option><option>100</option><option>200</option></select><ChevronDown size={14} /></label>
             <span>Страница {tokens.length}</span>
-            <div><button disabled={tokens.length === 1 || loading} onClick={() => setTokens((value) => value.slice(0, -1))}><ArrowLeft size={16} /></button><button disabled={!nextToken || loading} onClick={() => nextToken && setTokens((value) => [...value, nextToken])}><ArrowRight size={16} /></button></div>
+            <div><button disabled={tokens.length === 1 || loading} onClick={() => { setSelectedKeys(new Set()); setTokens((value) => value.slice(0, -1)) }}><ArrowLeft size={16} /></button><button disabled={!nextToken || loading} onClick={() => { if (nextToken) { setSelectedKeys(new Set()); setTokens((value) => [...value, nextToken]) } }}><ArrowRight size={16} /></button></div>
           </footer>
         </section>
       </main>
@@ -384,11 +453,11 @@ export function Browser({ connection, onDisconnect }: Props) {
           <button onClick={() => { contextMenu.item.type === 'folder' ? openPrefix(contextMenu.item.key) : setPreview(contextMenu.item); setContextMenu(null) }}><FolderInput size={16} />{contextMenu.item.type === 'folder' ? 'Открыть' : 'Предпросмотр'}</button>
           <a href={contextMenu.item.type === 'folder' ? archiveUrl(contextMenu.item.key) : contentUrl(contextMenu.item.key, true)} onClick={() => setContextMenu(null)}><Download size={16} />{contextMenu.item.type === 'folder' ? 'Скачать ZIP' : 'Скачать'}</a>
           <div className="context-separator" />
-          <button onClick={() => putOnClipboard(contextMenu.item, 'copy')}><Copy size={16} />Копировать</button>
-          <button onClick={() => putOnClipboard(contextMenu.item, 'cut')}><Scissors size={16} />Вырезать</button>
-          <button onClick={() => { openMove(contextMenu.item); setContextMenu(null) }}><Move size={16} />Переименовать / переместить</button>
+          <button onClick={() => putOnClipboard(actionItems(contextMenu.item), 'copy')}><Copy size={16} />Копировать{actionItems(contextMenu.item).length > 1 ? ` (${actionItems(contextMenu.item).length})` : ''}</button>
+          <button onClick={() => putOnClipboard(actionItems(contextMenu.item), 'cut')}><Scissors size={16} />Вырезать{actionItems(contextMenu.item).length > 1 ? ` (${actionItems(contextMenu.item).length})` : ''}</button>
+          {actionItems(contextMenu.item).length === 1 && <button onClick={() => { openMove(contextMenu.item); setContextMenu(null) }}><Move size={16} />Переименовать / переместить</button>}
           <div className="context-separator" />
-          <button className="danger" onClick={() => { openDelete(contextMenu.item); setContextMenu(null) }}><Trash2 size={16} />Удалить</button>
+          <button className="danger" onClick={() => { openDelete(actionItems(contextMenu.item)); setContextMenu(null) }}><Trash2 size={16} />Удалить{actionItems(contextMenu.item).length > 1 ? ` (${actionItems(contextMenu.item).length})` : ''}</button>
         </div>
       )}
       {dragActive && <div className="drop-overlay" onDragLeave={() => setDragActive(false)}><div><Upload size={32} /><strong>Отпустите, чтобы загрузить</strong><span>Файлы попадут в текущую папку</span></div></div>}
@@ -403,7 +472,7 @@ export function Browser({ connection, onDisconnect }: Props) {
 
       {dialog === 'folder' && <Modal title="Новая папка" onClose={() => setDialog(null)}><div className="modal-body"><label><span>Название папки</span><input autoFocus value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submitDialog()} placeholder="Например, документы" /></label><small>Будет создана в <strong>/{prefix}</strong></small></div><div className="modal-actions"><button className="secondary-button" onClick={() => setDialog(null)}>Отмена</button><button className="primary-button" disabled={busy} onClick={() => void submitDialog()}>Создать</button></div></Modal>}
       {dialog === 'move' && activeItem && <Modal title="Переместить или переименовать" onClose={() => setDialog(null)}><div className="modal-body"><label><span>Новый полный путь</span><input autoFocus value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submitDialog()} /></label><small>Укажите путь от корня бакета. Для переименования измените последнюю часть.</small></div><div className="modal-actions"><button className="secondary-button" onClick={() => setDialog(null)}>Отмена</button><button className="primary-button" disabled={busy} onClick={() => void submitDialog()}>Переместить</button></div></Modal>}
-      {dialog === 'delete' && activeItem && <Modal title={`Удалить ${activeItem.type === 'folder' ? 'папку' : 'файл'}?`} onClose={() => setDialog(null)}><div className="modal-body delete-copy"><div className="delete-icon"><Trash2 size={22} /></div><p><strong>{activeItem.name}</strong>{activeItem.type === 'folder' ? ' и всё её содержимое будут удалены без возможности восстановления.' : ' будет удалён без возможности восстановления.'}</p></div><div className="modal-actions"><button className="secondary-button" onClick={() => setDialog(null)}>Отмена</button><button className="danger-button" disabled={busy} onClick={() => void submitDialog()}>Удалить</button></div></Modal>}
+      {dialog === 'delete' && deleteItems.length > 0 && <Modal title={deleteItems.length === 1 ? `Удалить ${deleteItems[0].type === 'folder' ? 'папку' : 'файл'}?` : `Удалить объекты (${deleteItems.length})?`} onClose={() => setDialog(null)}><div className="modal-body delete-copy"><div className="delete-icon"><Trash2 size={22} /></div><p><strong>{deleteItems.length === 1 ? deleteItems[0].name : `Выбрано объектов: ${deleteItems.length}`}</strong>{deleteItems.length === 1 ? (deleteItems[0].type === 'folder' ? ' и всё её содержимое будут удалены без возможности восстановления.' : ' будет удалён без возможности восстановления.') : 'Выбранные объекты и всё содержимое папок будут удалены без возможности восстановления.'}</p></div><div className="modal-actions"><button className="secondary-button" onClick={() => setDialog(null)}>Отмена</button><button className="danger-button" disabled={busy} onClick={() => void submitDialog()}>Удалить</button></div></Modal>}
     </div>
   )
 }
