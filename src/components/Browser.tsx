@@ -14,6 +14,7 @@ type Sort = 'name' | 'size' | 'date'
 type UploadEntry = { file: File; relativePath: string }
 type ClipboardState = { item: S3Object; operation: 'copy' | 'cut' }
 type ContextMenuState = { item: S3Object; x: number; y: number }
+type OperationProgress = { label: string; completed: number; total: number }
 
 interface FileSystemEntryLike {
   isFile: boolean
@@ -78,11 +79,13 @@ export function Browser({ connection, onDisconnect }: Props) {
   const [inputValue, setInputValue] = useState('')
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState('')
+  const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
+  const toastTimer = useRef<number | null>(null)
 
   const currentToken = tokens[tokens.length - 1]
 
@@ -100,6 +103,10 @@ export function Browser({ connection, onDisconnect }: Props) {
     folderInput.current?.setAttribute('webkitdirectory', '')
   }, [])
 
+  useEffect(() => () => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+  }, [])
+
   useEffect(() => {
     if (!contextMenu) return
     const close = () => setContextMenu(null)
@@ -113,8 +120,12 @@ export function Browser({ connection, onDisconnect }: Props) {
   }, [contextMenu])
 
   function showToast(message: string) {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
     setToast(message)
-    window.setTimeout(() => setToast(''), 3500)
+    toastTimer.current = window.setTimeout(() => {
+      setToast('')
+      toastTimer.current = null
+    }, 3500)
   }
 
   function openPrefix(value: string) {
@@ -147,6 +158,7 @@ export function Browser({ connection, onDisconnect }: Props) {
     })
     if (!list.length) return
     setBusy(true)
+    setOperationProgress({ label: 'Загрузка файлов', completed: 0, total: list.length })
     try {
       let completed = 0
       let cursor = 0
@@ -156,15 +168,18 @@ export function Browser({ connection, onDisconnect }: Props) {
           const entry = list[index]
           await uploadFile(prefix, entry.file, entry.relativePath)
           completed += 1
-          showToast(`Загружено ${completed} из ${list.length}`)
+          setOperationProgress({ label: 'Загрузка файлов', completed, total: list.length })
         }
       })
-      await Promise.all(workers)
+      const results = await Promise.allSettled(workers)
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failed) throw failed.reason
       showToast(list.length === 1 ? 'Файл загружен' : `Загружено файлов: ${list.length}`)
       setRefresh((value) => value + 1)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Ошибка загрузки')
     } finally {
+      setOperationProgress(null)
       setBusy(false)
       if (fileInput.current) fileInput.current.value = ''
       if (folderInput.current) folderInput.current.value = ''
@@ -364,6 +379,13 @@ export function Browser({ connection, onDisconnect }: Props) {
         </div>
       )}
       {dragActive && <div className="drop-overlay" onDragLeave={() => setDragActive(false)}><div><Upload size={32} /><strong>Отпустите, чтобы загрузить</strong><span>Файлы попадут в текущую папку</span></div></div>}
+      {operationProgress && (
+        <div className="operation-progress" role="progressbar" aria-label={operationProgress.label} aria-valuemin={0} aria-valuemax={operationProgress.total} aria-valuenow={operationProgress.completed}>
+          <LoaderCircle className="spin" size={17} />
+          <div><strong>{operationProgress.label}</strong><span>Осталось: {operationProgress.total - operationProgress.completed}</span></div>
+          <div className="operation-progress-track"><span style={{ width: `${operationProgress.total ? operationProgress.completed / operationProgress.total * 100 : 0}%` }} /></div>
+        </div>
+      )}
       {toast && <div className="toast">{busy && <LoaderCircle className="spin" size={16} />}{toast}</div>}
 
       {dialog === 'folder' && <Modal title="Новая папка" onClose={() => setDialog(null)}><div className="modal-body"><label><span>Название папки</span><input autoFocus value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submitDialog()} placeholder="Например, документы" /></label><small>Будет создана в <strong>/{prefix}</strong></small></div><div className="modal-actions"><button className="secondary-button" onClick={() => setDialog(null)}>Отмена</button><button className="primary-button" disabled={busy} onClick={() => void submitDialog()}>Создать</button></div></Modal>}
