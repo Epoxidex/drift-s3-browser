@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent }
 import {
   ArrowDownAZ, ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, Database, Download, File, FileArchive,
   FileCode2, FileImage, FileText, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutList, LoaderCircle,
-  LogOut, MoreHorizontal, Move, PackageOpen, RefreshCw, Scissors, Search, Trash2, Upload, X, Copy, ClipboardPaste,
+  LogOut, MoreHorizontal, Move, PackageOpen, RefreshCw, Scissors, Search, Trash2, Upload, X, Copy, ClipboardCopy, ClipboardPaste,
 } from 'lucide-react'
 import { archiveUrl, contentUrl, copyObject, createFolder, deleteObject, listObjects, moveObject, uploadFile, type TransferProgress } from '../api'
 import type { Connection, S3Object } from '../types'
@@ -243,6 +243,29 @@ export function Browser({ connection, onDisconnect }: Props) {
     return selectedKeys.has(item.key) ? selectedItems : [item]
   }
 
+  async function copyFullPath(item: S3Object) {
+    const fullPath = `s3://${connection.bucket}/${item.key}`
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(fullPath)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = fullPath
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        const copied = document.execCommand('copy')
+        textarea.remove()
+        if (!copied) throw new Error('Clipboard API недоступен')
+      }
+      setContextMenu(null)
+      showToast('Полный путь скопирован')
+    } catch {
+      showToast('Не удалось скопировать полный путь')
+    }
+  }
+
   function putOnClipboard(itemsToStore: S3Object[], operation: 'copy' | 'cut') {
     if (!itemsToStore.length) return
     setClipboard({ items: itemsToStore, operation })
@@ -452,6 +475,7 @@ export function Browser({ connection, onDisconnect }: Props) {
         <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
           <button onClick={() => { contextMenu.item.type === 'folder' ? openPrefix(contextMenu.item.key) : setPreview(contextMenu.item); setContextMenu(null) }}><FolderInput size={16} />{contextMenu.item.type === 'folder' ? 'Открыть' : 'Предпросмотр'}</button>
           <a href={contextMenu.item.type === 'folder' ? archiveUrl(contextMenu.item.key) : contentUrl(contextMenu.item.key, true)} onClick={() => setContextMenu(null)}><Download size={16} />{contextMenu.item.type === 'folder' ? 'Скачать ZIP' : 'Скачать'}</a>
+          <button onClick={() => void copyFullPath(contextMenu.item)}><ClipboardCopy size={16} />Скопировать полный путь</button>
           <div className="context-separator" />
           <button onClick={() => putOnClipboard(actionItems(contextMenu.item), 'copy')}><Copy size={16} />Копировать{actionItems(contextMenu.item).length > 1 ? ` (${actionItems(contextMenu.item).length})` : ''}</button>
           <button onClick={() => putOnClipboard(actionItems(contextMenu.item), 'cut')}><Scissors size={16} />Вырезать{actionItems(contextMenu.item).length > 1 ? ` (${actionItems(contextMenu.item).length})` : ''}</button>
