@@ -1,14 +1,14 @@
 import { access } from 'node:fs/promises'
 import path from 'node:path'
-import type { Readable } from 'node:stream'
+import { PassThrough, type Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import multipart from '@fastify/multipart'
 import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
-import Fastify, { type FastifyRequest } from 'fastify'
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
 import { lookup as lookupMime } from 'mime-types'
 import { addConnection, addDefaultConnectionFromEnv, getClient, getConnection, listConnections, parseConnection, removeConnection } from './connection-store.js'
-import { copyObject, createFolder, createFolderArchive, deleteObject, getObject, headObject, listObjects, moveObject, uploadObject } from './s3-service.js'
+import { copyObject, createFolder, createFolderArchive, deleteObject, getObject, headObject, listObjects, moveObject, uploadObject, type TransferProgress } from './s3-service.js'
 
 type Query = Record<string, string | undefined>
 
@@ -27,6 +27,22 @@ function requireConnection(request: FastifyRequest) {
 function requiredString(value: unknown, label: string) {
   if (typeof value !== 'string' || !value) throw new Error(`Не указано поле «${label}»`)
   return value
+}
+
+function sendTransferProgress(reply: FastifyReply, run: (onProgress: (progress: TransferProgress) => void) => Promise<number>) {
+  const stream = new PassThrough()
+  const write = (event: Record<string, unknown>) => stream.write(`${JSON.stringify(event)}\n`)
+  reply.header('content-type', 'application/x-ndjson; charset=utf-8')
+  void run((progress) => write({ type: 'progress', ...progress }))
+    .then((count) => {
+      write({ type: 'complete', count })
+      stream.end()
+    })
+    .catch((error) => {
+      write({ type: 'error', error: error instanceof Error ? error.message : 'Операция не выполнена' })
+      stream.end()
+    })
+  return reply.send(stream)
 }
 
 export async function buildApp() {
@@ -142,20 +158,20 @@ export async function buildApp() {
     return reply.code(201).send({ key: key.endsWith('/') ? key : `${key}/` })
   })
 
-  app.post('/api/objects/copy', async (request) => {
+  app.post('/api/objects/copy', async (request, reply) => {
     const connection = requireConnection(request)
     const body = request.body as Record<string, unknown>
     const sourceKey = requiredString(body?.sourceKey, 'sourceKey')
     const targetKey = requiredString(body?.targetKey, 'targetKey')
-    return { count: await copyObject(getClient(connection), connection, sourceKey, targetKey, body?.type === 'folder') }
+    return sendTransferProgress(reply, (onProgress) => copyObject(getClient(connection), connection, sourceKey, targetKey, body?.type === 'folder', onProgress))
   })
 
-  app.post('/api/objects/move', async (request) => {
+  app.post('/api/objects/move', async (request, reply) => {
     const connection = requireConnection(request)
     const body = request.body as Record<string, unknown>
     const sourceKey = requiredString(body?.sourceKey, 'sourceKey')
     const targetKey = requiredString(body?.targetKey, 'targetKey')
-    return { count: await moveObject(getClient(connection), connection, sourceKey, targetKey, body?.type === 'folder') }
+    return sendTransferProgress(reply, (onProgress) => moveObject(getClient(connection), connection, sourceKey, targetKey, body?.type === 'folder', onProgress))
   })
 
   app.delete('/api/objects', async (request) => {

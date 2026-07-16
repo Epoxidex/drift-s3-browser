@@ -11,6 +11,12 @@ export class ApiError extends Error {
   }
 }
 
+export type TransferProgress = {
+  phase: 'copying' | 'deleting'
+  completed: number
+  total: number
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (connectionId) headers.set('x-s3-connection', connectionId)
@@ -100,18 +106,55 @@ export function uploadFile(prefix: string, file: File, relativePath = file.name)
   return request<{ key: string }>(`/api/objects/upload?${new URLSearchParams({ prefix, relativePath })}`, { method: 'POST', body: form })
 }
 
-export function copyObject(item: S3Object, targetKey: string) {
-  return request<{ count: number }>('/api/objects/copy', {
-    method: 'POST',
-    body: JSON.stringify({ sourceKey: item.key, targetKey, type: item.type }),
-  })
+async function transferObject(path: '/api/objects/copy' | '/api/objects/move', item: S3Object, targetKey: string, onProgress?: (progress: TransferProgress) => void) {
+  let response: Response
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-s3-connection': connectionId },
+      body: JSON.stringify({ sourceKey: item.key, targetKey, type: item.type }),
+    })
+  } catch {
+    throw new ApiError('API-сервер недоступен. Убедитесь, что npm run dev запустил процессы [api] и [web].', 0)
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null
+    throw new ApiError(body?.error || `Ошибка запроса (${response.status})`, response.status)
+  }
+  if (!response.body) throw new ApiError('Сервер не вернул поток прогресса', response.status)
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: { count: number } | null = null
+
+  const consumeLine = (line: string) => {
+    if (!line.trim()) return
+    const event = JSON.parse(line) as ({ type: 'progress' } & TransferProgress) | { type: 'complete'; count: number } | { type: 'error'; error: string }
+    if (event.type === 'progress') onProgress?.(event)
+    else if (event.type === 'complete') result = { count: event.count }
+    else throw new ApiError(event.error, response.status)
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    lines.forEach(consumeLine)
+    if (done) break
+  }
+  consumeLine(buffer)
+  if (!result) throw new ApiError('Поток прогресса завершился преждевременно', response.status)
+  return result
 }
 
-export function moveObject(item: S3Object, targetKey: string) {
-  return request<{ count: number }>('/api/objects/move', {
-    method: 'POST',
-    body: JSON.stringify({ sourceKey: item.key, targetKey, type: item.type }),
-  })
+export function copyObject(item: S3Object, targetKey: string, onProgress?: (progress: TransferProgress) => void) {
+  return transferObject('/api/objects/copy', item, targetKey, onProgress)
+}
+
+export function moveObject(item: S3Object, targetKey: string, onProgress?: (progress: TransferProgress) => void) {
+  return transferObject('/api/objects/move', item, targetKey, onProgress)
 }
 
 export function deleteObject(item: S3Object) {

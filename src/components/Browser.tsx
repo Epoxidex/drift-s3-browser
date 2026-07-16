@@ -4,7 +4,7 @@ import {
   FileCode2, FileImage, FileText, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutList, LoaderCircle,
   LogOut, MoreHorizontal, Move, PackageOpen, RefreshCw, Scissors, Search, Trash2, Upload, X, Copy, ClipboardPaste,
 } from 'lucide-react'
-import { archiveUrl, contentUrl, copyObject, createFolder, deleteObject, listObjects, moveObject, uploadFile } from '../api'
+import { archiveUrl, contentUrl, copyObject, createFolder, deleteObject, listObjects, moveObject, uploadFile, type TransferProgress } from '../api'
 import type { Connection, S3Object } from '../types'
 import { Modal } from './Modal'
 import { PreviewPanel } from './PreviewPanel'
@@ -226,15 +226,22 @@ export function Browser({ connection, onDisconnect }: Props) {
       return
     }
     setBusy(true)
+    setOperationProgress({ label: clipboard.operation === 'copy' ? 'Подготовка к копированию' : 'Подготовка к переносу', completed: 0, total: 1 })
     try {
-      if (clipboard.operation === 'copy') await copyObject(clipboard.item, targetKey)
-      else await moveObject(clipboard.item, targetKey)
+      const updateProgress = (progress: TransferProgress) => setOperationProgress({
+        label: progress.phase === 'copying' ? `Копирование «${clipboard.item.name}»` : `Удаление исходников «${clipboard.item.name}»`,
+        completed: progress.completed,
+        total: progress.total,
+      })
+      if (clipboard.operation === 'copy') await copyObject(clipboard.item, targetKey, updateProgress)
+      else await moveObject(clipboard.item, targetKey, updateProgress)
       showToast(clipboard.operation === 'copy' ? 'Объект скопирован' : 'Объект перемещён')
       if (clipboard.operation === 'cut') setClipboard(null)
       setRefresh((value) => value + 1)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось вставить объект')
     } finally {
+      setOperationProgress(null)
       setBusy(false)
     }
   }
@@ -261,7 +268,12 @@ export function Browser({ connection, onDisconnect }: Props) {
       } else if (dialog === 'move' && activeItem) {
         const target = inputValue.trim()
         if (!target) throw new Error('Введите новый путь')
-        await moveObject(activeItem, target)
+        setOperationProgress({ label: 'Подготовка к переносу', completed: 0, total: 1 })
+        await moveObject(activeItem, target, (progress) => setOperationProgress({
+          label: progress.phase === 'copying' ? `Копирование «${activeItem.name}»` : `Удаление исходников «${activeItem.name}»`,
+          completed: progress.completed,
+          total: progress.total,
+        }))
         if (preview?.key === activeItem.key) setPreview(null)
         showToast('Объект перемещён')
       } else if (dialog === 'delete' && activeItem) {
@@ -274,6 +286,7 @@ export function Browser({ connection, onDisconnect }: Props) {
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Операция не выполнена')
     } finally {
+      setOperationProgress(null)
       setBusy(false)
     }
   }

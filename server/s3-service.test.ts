@@ -87,6 +87,24 @@ describe('mutating operations', () => {
     )
   })
 
+  it('reports copy and delete progress while moving a folder', async () => {
+    const client = fakeClient((command) => {
+      if (command instanceof ListObjectsV2Command) return { Contents: [{ Key: 'old/' }, { Key: 'old/file.txt' }] }
+      return {}
+    })
+    const progress = vi.fn()
+
+    await moveObject(client, connection, 'old/', 'new/', true, progress)
+
+    expect(progress.mock.calls.map(([event]) => event)).toEqual([
+      { phase: 'copying', completed: 0, total: 2 },
+      { phase: 'copying', completed: 1, total: 2 },
+      { phase: 'copying', completed: 2, total: 2 },
+      { phase: 'deleting', completed: 0, total: 2 },
+      { phase: 'deleting', completed: 2, total: 2 },
+    ])
+  })
+
   it('deletes large folders in S3 batches', async () => {
     const commands: unknown[] = []
     const client = fakeClient((command) => {

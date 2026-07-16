@@ -23,6 +23,14 @@ export type ObjectItem = {
   etag?: string
 }
 
+export type TransferProgress = {
+  phase: 'copying' | 'deleting'
+  completed: number
+  total: number
+}
+
+type ProgressCallback = (progress: TransferProgress) => void
+
 export async function listObjects(client: S3Client, connection: StoredConnection, prefix: string, continuationToken?: string, pageSize = 50) {
   const response = await client.send(new ListObjectsV2Command({
     Bucket: connection.bucket,
@@ -142,12 +150,13 @@ export async function deleteObject(client: S3Client, connection: StoredConnectio
   return keys.length
 }
 
-async function deleteKeys(client: S3Client, connection: StoredConnection, keys: string[]) {
+async function deleteKeys(client: S3Client, connection: StoredConnection, keys: string[], onProgress?: (completed: number) => void) {
   for (let index = 0; index < keys.length; index += 1000) {
     await client.send(new DeleteObjectsCommand({
       Bucket: connection.bucket,
       Delete: { Objects: keys.slice(index, index + 1000).map((Key) => ({ Key })), Quiet: true },
     }))
+    onProgress?.(Math.min(index + 1000, keys.length))
   }
 }
 
@@ -155,19 +164,26 @@ function encodeCopySource(bucket: string, key: string) {
   return `/${encodeURIComponent(bucket)}/${key.split('/').map(encodeURIComponent).join('/')}`
 }
 
-export async function moveObject(client: S3Client, connection: StoredConnection, sourceKey: string, targetKey: string, isFolder: boolean) {
+export async function moveObject(client: S3Client, connection: StoredConnection, sourceKey: string, targetKey: string, isFolder: boolean, onProgress?: ProgressCallback) {
   if (!validateCopyTarget(sourceKey, targetKey, isFolder)) return 0
   const sourceKeys = isFolder ? await listAllKeys(client, connection, sourceKey) : [sourceKey]
-  await copyKeys(client, connection, sourceKeys, sourceKey, targetKey, isFolder)
-  if (isFolder) await deleteKeys(client, connection, sourceKeys)
-  else await client.send(new DeleteObjectCommand({ Bucket: connection.bucket, Key: sourceKey }))
+  onProgress?.({ phase: 'copying', completed: 0, total: sourceKeys.length })
+  await copyKeys(client, connection, sourceKeys, sourceKey, targetKey, isFolder, onProgress)
+  onProgress?.({ phase: 'deleting', completed: 0, total: sourceKeys.length })
+  if (isFolder) {
+    await deleteKeys(client, connection, sourceKeys, (completed) => onProgress?.({ phase: 'deleting', completed, total: sourceKeys.length }))
+  } else {
+    await client.send(new DeleteObjectCommand({ Bucket: connection.bucket, Key: sourceKey }))
+    onProgress?.({ phase: 'deleting', completed: 1, total: 1 })
+  }
   return sourceKeys.length
 }
 
-export async function copyObject(client: S3Client, connection: StoredConnection, sourceKey: string, targetKey: string, isFolder: boolean) {
+export async function copyObject(client: S3Client, connection: StoredConnection, sourceKey: string, targetKey: string, isFolder: boolean, onProgress?: ProgressCallback) {
   if (!validateCopyTarget(sourceKey, targetKey, isFolder)) return 0
   const sourceKeys = isFolder ? await listAllKeys(client, connection, sourceKey) : [sourceKey]
-  await copyKeys(client, connection, sourceKeys, sourceKey, targetKey, isFolder)
+  onProgress?.({ phase: 'copying', completed: 0, total: sourceKeys.length })
+  await copyKeys(client, connection, sourceKeys, sourceKey, targetKey, isFolder, onProgress)
   return sourceKeys.length
 }
 
@@ -177,15 +193,20 @@ function validateCopyTarget(sourceKey: string, targetKey: string, isFolder: bool
   return true
 }
 
-async function copyKeys(client: S3Client, connection: StoredConnection, sourceKeys: string[], sourceKey: string, targetKey: string, isFolder: boolean) {
+async function copyKeys(client: S3Client, connection: StoredConnection, sourceKeys: string[], sourceKey: string, targetKey: string, isFolder: boolean, onProgress?: ProgressCallback) {
   const targetPrefix = isFolder ? (targetKey.endsWith('/') ? targetKey : `${targetKey}/`) : targetKey
   const sourcePrefix = isFolder ? sourceKey : ''
+  let completed = 0
 
   for (let index = 0; index < sourceKeys.length; index += 8) {
-    await Promise.all(sourceKeys.slice(index, index + 8).map((key) => client.send(new CopyObjectCommand({
-      Bucket: connection.bucket,
-      Key: isFolder ? `${targetPrefix}${key.slice(sourcePrefix.length)}` : targetPrefix,
-      CopySource: encodeCopySource(connection.bucket, key),
-    }))))
+    await Promise.all(sourceKeys.slice(index, index + 8).map(async (key) => {
+      await client.send(new CopyObjectCommand({
+        Bucket: connection.bucket,
+        Key: isFolder ? `${targetPrefix}${key.slice(sourcePrefix.length)}` : targetPrefix,
+        CopySource: encodeCopySource(connection.bucket, key),
+      }))
+      completed += 1
+      onProgress?.({ phase: 'copying', completed, total: sourceKeys.length })
+    }))
   }
 }
